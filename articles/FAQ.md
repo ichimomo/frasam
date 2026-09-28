@@ -1,0 +1,1158 @@
+# FAQ on how to use 'frasam'
+
+## Frequently Asked Questions
+
+この文書は、`frasam`
+を使うときによくある質問・要望と対応方針をまとめるためのものです。
+解析の詳細な手順は通常のvignetteに残し、ここではエラー対応、確認方法、開発時の注意点を短く整理します。
+ここに載せてほしい項目は、[Issues](https://github.com/ShotaNishijima/frasam/issues)に書き込んでください。あるいは、ニシジマまで連絡してください。
+
+### インストールと依存パッケージ
+
+#### どのブランチを`frasam` を使えばよい？
+
+- このvignetteにある仕様を使う場合は`frasam` は
+  `create_vignette`のブランチをインストールしてください
+
+``` r
+
+install.packages("remotes")
+remotes::install_github("ShotaNishijima/frasam@create_vignette")
+# remotes::install_github("ichimomo/frasyr@dev")
+
+library(frasam)
+library(tidyverse)
+```
+
+#### `frasyr` がないと言われます
+
+`frasam` は `frasyr` に依存しています。未インストールの場合は、開発版の
+`frasyr` を入れてから再実行してください。
+
+``` r
+
+remotes::install_github("ichimomo/frasyr@dev")
+library(frasyr)
+```
+
+### SAMの実行
+
+#### `use_sam_tmb()` はいつ実行しますか？
+
+- [`sam()`](https://shotanishijima.github.io/frasam/reference/sam.md)
+  を実行する前に、TMBで使う実行ファイルを準備するために実行します。
+- 通常のテストや例では、上書きしない設定にします。
+
+``` r
+
+ use_sam_tmb(overwrite = FALSE, compile = "auto")
+#> [1] TRUE
+```
+
+#### 一部の引数のみを変更して解析したい
+
+- SAMの結果オブジェクトに格納されている`input`と`do.call`（または[`frasyr::safe_call`](https://rdrr.io/pkg/frasyr/man/safe_call.html)を使って、前までの設定を引き継いだ解析ができます
+- ここでは再生産関係を変更した場合を例に説明します。
+
+``` r
+
+data("dat_ex") #example data
+
+#Random walk (RW)
+res_rw  <- sam(
+  dat_ex,
+  last.catch.zero = TRUE, #最終年のcatchがzeroかどうか
+  abund = c("N","N","N","SSB","B"),
+  min.age=c(0,0,1,0,0),
+  max.age = c(0,0,1,6,6),
+  rec.age = 0,
+  index.key=0:4, #すべてのindexの観測誤差のSDが異なる、という設定
+  b.est=FALSE,
+  SR = "RW",
+  varC = c(0,0,1,1,1,2,2), #0-1歳, 2-4歳, 5-6+歳でcatch at ageの観測誤差のSDが共通
+  varF = c(0,0,1,1,1,1,1), #0-1歳, 2-6+歳でF at ageの過程誤差のSDが共通
+  varN = c(0,1,1,1,1,1,1), #0歳, 1-6+歳でN at ageの過程誤差のSDが共通
+  rho.mode=3,
+  bias.correct = FALSE,
+  silent = TRUE
+)
+
+# RW -> BH
+input <- res_rw$input
+input$SR <- "BH"
+res_bh <- do.call(sam, input)
+
+# RW -> RI
+input$SR <- "RI"
+res_ri <- do.call(sam, input)
+
+plot_samvpa(list(res_rw,res_bh,res_ri), CI=0.8,
+            scenario_name=rev(c("RW","BH","RI")))
+```
+
+![](FAQ_files/figure-html/use-do.call-1.png)
+
+#### 引数の形式がデータと合っていないことによるエラーを修正したい
+
+[`sam()`](https://shotanishijima.github.io/frasam/reference/sam.md)
+では、`q.init` などの初期値や `p0.list`
+の構造が現在のデータ・モデル設定と合っていない場合、TMB
+に渡す前にエラーとして止まります。
+この場合は、エラーメッセージに出ている引数の長さや構造を、現在の解析設定に合わせて修正します。
+
+例えば、`q.init` は index の数と同じ長さで与える必要があります。
+以下では、あえて 1 つ長い `q.init` を与えてエラーにしています。
+
+``` r
+
+bad_input <- res_ri$input
+bad_input$p0.list <- NULL
+bad_input$q.init <- rep(1, length(bad_input$abund) + 1)
+
+res_bad_q <- do.call(sam, bad_input)
+#> Error:
+#> ! 'q.init' must have length 5, but length 6 was supplied.
+```
+
+`bad_input$abund` の長さが index の数なので、`q.init`
+も同じ長さに直します。 特に初期値を指定する必要がなければ、`NULL`
+に戻してデフォルト初期値を使うのも安全です。
+
+``` r
+
+fixed_input <- bad_input
+fixed_input$q.init <- rep(1, length(fixed_input$abund))
+
+res_fixed_q <- do.call(sam, fixed_input)
+length(res_fixed_q$input$q.init)
+#> [1] 5
+length(res_fixed_q$input$abund)
+#> [1] 5
+```
+
+以前の解析結果を初期値として使う場合は、`p0.list`
+の各パラメータの名前・長さ・次元が、現在のモデル設定と一致している必要があります。
+以下では、`logQ` だけをあえて 1
+つ長くして、構造が合わない例を作っています。
+
+``` r
+
+bad_input <- res_ri$input
+bad_input$p0.list <- res_ri$init
+bad_input$p0.list$logQ <- c(bad_input$p0.list$logQ, 0)
+
+res_bad_p0 <- do.call(sam, bad_input)
+#> Error:
+#> ! 'p0.list' does not match the current model parameter structure:
+#> - logQ has length 6; expected 5
+```
+
+このような場合は、壊れた要素だけを手で直すより、同じモデル構造から得られた
+`init` や `par_list` を使い直すのが安全です。
+モデル構造を変えた場合は、`p0.list <- NULL`
+としてデフォルト初期値から再実行してください。
+
+``` r
+
+fixed_input <- bad_input
+fixed_input$p0.list <- res_ri$init
+
+res_fixed_p0 <- do.call(sam, fixed_input)
+length(res_fixed_p0$init$logQ)
+#> [1] 5
+length(res_fixed_p0$input$abund)
+#> [1] 5
+```
+
+モデル設定を変えた後に以前の推定値を初期値として使いたい場合は、まず
+`p0.list <- NULL` で一度実行し、その結果の `par_list` や `init`
+を次の解析に使うと、構造の不一致を避けやすくなります。
+
+#### モデルがちゃんと収束しているか判別したい
+
+[`check_fit_sam()`](https://shotanishijima.github.io/frasam/reference/check_fit_sam.md)
+を使うと、[`sam()`](https://shotanishijima.github.io/frasam/reference/sam.md)
+の結果について、収束コード、Hessian、勾配、標準誤差、極端なパラメータ値などをまとめて確認できます。
+返り値の `ok` が `TRUE` なら、基本的な診断項目はすべて通っています。
+
+``` r
+
+fit_check <- check_fit_sam(res_rw)
+#>                          check    ok              value       threshold
+#>          optimizer convergence  TRUE                  0               0
+#>      positive definite Hessian  TRUE               TRUE            TRUE
+#>  maximum fixed-effect gradient  TRUE          0.0001152            0.01
+#>    finite fixed effects and SE  TRUE              18/18             all
+#>        maximum fixed-effect SE  TRUE              55.08             Inf
+#>  maximum absolute fixed effect  TRUE              10.64             Inf
+#>           reported sigma range FALSE 2.388e-05 to 1.373     1e-04 to 10
+#>             reported rho range  TRUE   0.9796 to 0.9796 1e-04 to 0.9999
+#>  parameters near finite bounds  TRUE                  0               0
+#>                                                                         message
+#>                                                   nlminb convergence code is 0.
+#>                                                 sdreport reports pdHess = TRUE.
+#>                                         Maximum absolute fixed-effect gradient.
+#>                    Fixed-effect estimates and standard errors should be finite.
+#>                         Large standard errors can indicate weak identification.
+#>      Extremely large internal-scale estimates can indicate weak identification.
+#>  Reported standard deviations should be finite and within the diagnostic range.
+#>                 Rho values very close to 0 or 1 can indicate boundary behavior.
+#>                   Only checked when finite lower or upper bounds were supplied.
+
+fit_check$ok
+#> [1] FALSE
+fit_check$checks
+#>                           check    ok              value       threshold
+#> 1         optimizer convergence  TRUE                  0               0
+#> 2     positive definite Hessian  TRUE               TRUE            TRUE
+#> 3 maximum fixed-effect gradient  TRUE          0.0001152            0.01
+#> 4   finite fixed effects and SE  TRUE              18/18             all
+#> 5       maximum fixed-effect SE  TRUE              55.08             Inf
+#> 6 maximum absolute fixed effect  TRUE              10.64             Inf
+#> 7          reported sigma range FALSE 2.388e-05 to 1.373     1e-04 to 10
+#> 8            reported rho range  TRUE   0.9796 to 0.9796 1e-04 to 0.9999
+#> 9 parameters near finite bounds  TRUE                  0               0
+#>                                                                          message
+#> 1                                                  nlminb convergence code is 0.
+#> 2                                                sdreport reports pdHess = TRUE.
+#> 3                                        Maximum absolute fixed-effect gradient.
+#> 4                   Fixed-effect estimates and standard errors should be finite.
+#> 5                        Large standard errors can indicate weak identification.
+#> 6     Extremely large internal-scale estimates can indicate weak identification.
+#> 7 Reported standard deviations should be finite and within the diagnostic range.
+#> 8                Rho values very close to 0 or 1 can indicate boundary behavior.
+#> 9                  Only checked when finite lower or upper bounds were supplied.
+```
+
+`verbose = FALSE`
+を指定すると、実行時に表を表示せず、結果だけをオブジェクトとして保存できます。
+複数のモデルを比較するときは、`ok` や `checks` を取り出して使います。
+
+``` r
+
+fit_checks <- list(
+  RW = check_fit_sam(res_rw, verbose = FALSE),
+  BH = check_fit_sam(res_bh, verbose = FALSE),
+  RI = check_fit_sam(res_ri, verbose = FALSE)
+)
+
+sapply(fit_checks, function(x) x$ok)
+#>    RW    BH    RI 
+#> FALSE FALSE FALSE
+```
+
+特定の診断だけを詳しく見たい場合は、`checks` から該当行を取り出します。
+例えば、最大勾配や Hessian の状態は以下のように確認できます。
+
+``` r
+
+fit_check$checks[
+  fit_check$checks$check %in% c(
+    "maximum fixed-effect gradient",
+    "positive definite Hessian",
+    "reported sigma range"
+  ),
+]
+#>                           check    ok              value   threshold
+#> 2     positive definite Hessian  TRUE               TRUE        TRUE
+#> 3 maximum fixed-effect gradient  TRUE          0.0001152        0.01
+#> 7          reported sigma range FALSE 2.388e-05 to 1.373 1e-04 to 10
+#>                                                                          message
+#> 2                                                sdreport reports pdHess = TRUE.
+#> 3                                        Maximum absolute fixed-effect gradient.
+#> 7 Reported standard deviations should be finite and within the diagnostic range.
+```
+
+`fixed`
+には固定効果パラメータごとの推定値、標準誤差、勾配が入っています。
+標準誤差が大きいパラメータや、勾配が大きいパラメータを確認したいときに使います。
+
+``` r
+
+head(fit_check$fixed)
+#>           name   estimate         se      gradient
+#> 1         logQ -5.3393484 0.17713132 -5.160339e-05
+#> 2         logQ -4.7404517 0.21984731 -3.679972e-05
+#> 3         logQ -5.5526325 0.08309938  8.663253e-06
+#> 4         logQ  0.3089114 0.06075828  2.215296e-08
+#> 5         logQ -4.0119935 0.11963119  6.903226e-06
+#> 6 logSdLogFsta -0.4669707 0.16208903 -4.387291e-06
+
+fit_check$fixed[
+  order(abs(fit_check$fixed$gradient), decreasing = TRUE),
+][1:5, ]
+#>            name   estimate        se      gradient
+#> 7  logSdLogFsta -1.1622797 0.1567145 -1.151927e-04
+#> 11  logSdLogObs -1.3083824 0.1096391 -1.085972e-04
+#> 15  logSdLogObs -0.7159731 0.1236300  1.011676e-04
+#> 10  logSdLogObs -0.5883400 0.1054278 -8.352417e-05
+#> 1          logQ -5.3393484 0.1771313 -5.160339e-05
+```
+
+診断のしきい値は引数で変更できます。 例えば、勾配をより厳しく見る場合は
+`gradient_tol` を小さくします。
+
+``` r
+
+check_fit_sam(res_rw, gradient_tol = 1e-4, verbose = FALSE)$checks
+#>                           check    ok              value       threshold
+#> 1         optimizer convergence  TRUE                  0               0
+#> 2     positive definite Hessian  TRUE               TRUE            TRUE
+#> 3 maximum fixed-effect gradient FALSE          0.0001152           1e-04
+#> 4   finite fixed effects and SE  TRUE              18/18             all
+#> 5       maximum fixed-effect SE  TRUE              55.08             Inf
+#> 6 maximum absolute fixed effect  TRUE              10.64             Inf
+#> 7          reported sigma range FALSE 2.388e-05 to 1.373     1e-04 to 10
+#> 8            reported rho range  TRUE   0.9796 to 0.9796 1e-04 to 0.9999
+#> 9 parameters near finite bounds  TRUE                  0               0
+#>                                                                          message
+#> 1                                                  nlminb convergence code is 0.
+#> 2                                                sdreport reports pdHess = TRUE.
+#> 3                                        Maximum absolute fixed-effect gradient.
+#> 4                   Fixed-effect estimates and standard errors should be finite.
+#> 5                        Large standard errors can indicate weak identification.
+#> 6     Extremely large internal-scale estimates can indicate weak identification.
+#> 7 Reported standard deviations should be finite and within the diagnostic range.
+#> 8                Rho values very close to 0 or 1 can indicate boundary behavior.
+#> 9                  Only checked when finite lower or upper bounds were supplied.
+```
+
+`reported sigma range` が `FALSE` になった場合は、`sigma`
+テーブルを見ると、どの種類・何番目の sigma
+がしきい値の外にあるかを確認できます。
+
+``` r
+
+fit_check$sigma
+#>             type index        value    ok   problem
+#> 1          sigma     1 1.098490e+00  TRUE          
+#> 2          sigma     2 1.372971e+00  TRUE          
+#> 3          sigma     3 4.887163e-01  TRUE          
+#> 4          sigma     4 3.385311e-01  TRUE          
+#> 5          sigma     5 7.328954e-01  TRUE          
+#> 6     sigma.logC     1 5.552483e-01  TRUE          
+#> 7     sigma.logC     2 5.552483e-01  TRUE          
+#> 8     sigma.logC     3 2.702569e-01  TRUE          
+#> 9     sigma.logC     4 2.702569e-01  TRUE          
+#> 10    sigma.logC     5 2.702569e-01  TRUE          
+#> 11    sigma.logC     6 4.575532e-01  TRUE          
+#> 12    sigma.logC     7 4.575532e-01  TRUE          
+#> 13 sigma.logFsta     1 6.268985e-01  TRUE          
+#> 14 sigma.logFsta     2 6.268985e-01  TRUE          
+#> 15 sigma.logFsta     3 3.127723e-01  TRUE          
+#> 16 sigma.logFsta     4 3.127723e-01  TRUE          
+#> 17 sigma.logFsta     5 3.127723e-01  TRUE          
+#> 18 sigma.logFsta     6 3.127723e-01  TRUE          
+#> 19 sigma.logFsta     7 3.127723e-01  TRUE          
+#> 20    sigma.logN     1 6.279345e-01  TRUE          
+#> 21    sigma.logN     2 2.388496e-05 FALSE too small
+#> 22    sigma.logN     3 2.388496e-05 FALSE too small
+#> 23    sigma.logN     4 2.388496e-05 FALSE too small
+#> 24    sigma.logN     5 2.388496e-05 FALSE too small
+#> 25    sigma.logN     6 2.388496e-05 FALSE too small
+#> 26    sigma.logN     7 2.388496e-05 FALSE too small
+
+fit_check$sigma[!fit_check$sigma$ok, ]
+#>          type index        value    ok   problem
+#> 21 sigma.logN     2 2.388496e-05 FALSE too small
+#> 22 sigma.logN     3 2.388496e-05 FALSE too small
+#> 23 sigma.logN     4 2.388496e-05 FALSE too small
+#> 24 sigma.logN     5 2.388496e-05 FALSE too small
+#> 25 sigma.logN     6 2.388496e-05 FALSE too small
+#> 26 sigma.logN     7 2.388496e-05 FALSE too small
+```
+
+しきい値を変えて確認したい場合は、`sigma_range` を指定します。
+例えば、以下では説明用にかなり狭い範囲を指定しています。
+
+``` r
+
+fit_check_strict_sigma <- check_fit_sam(
+  res_rw,
+  sigma_range = c(0.5, 1),
+  verbose = FALSE
+)
+
+fit_check_strict_sigma$checks[
+  fit_check_strict_sigma$checks$check == "reported sigma range",
+]
+#>                  check    ok              value threshold
+#> 7 reported sigma range FALSE 2.388e-05 to 1.373  0.5 to 1
+#>                                                                          message
+#> 7 Reported standard deviations should be finite and within the diagnostic range.
+
+fit_check_strict_sigma$sigma[!fit_check_strict_sigma$sigma$ok, ]
+#>             type index        value    ok   problem
+#> 1          sigma     1 1.098490e+00 FALSE too large
+#> 2          sigma     2 1.372971e+00 FALSE too large
+#> 3          sigma     3 4.887163e-01 FALSE too small
+#> 4          sigma     4 3.385311e-01 FALSE too small
+#> 8     sigma.logC     3 2.702569e-01 FALSE too small
+#> 9     sigma.logC     4 2.702569e-01 FALSE too small
+#> 10    sigma.logC     5 2.702569e-01 FALSE too small
+#> 11    sigma.logC     6 4.575532e-01 FALSE too small
+#> 12    sigma.logC     7 4.575532e-01 FALSE too small
+#> 15 sigma.logFsta     3 3.127723e-01 FALSE too small
+#> 16 sigma.logFsta     4 3.127723e-01 FALSE too small
+#> 17 sigma.logFsta     5 3.127723e-01 FALSE too small
+#> 18 sigma.logFsta     6 3.127723e-01 FALSE too small
+#> 19 sigma.logFsta     7 3.127723e-01 FALSE too small
+#> 21    sigma.logN     2 2.388496e-05 FALSE too small
+#> 22    sigma.logN     3 2.388496e-05 FALSE too small
+#> 23    sigma.logN     4 2.388496e-05 FALSE too small
+#> 24    sigma.logN     5 2.388496e-05 FALSE too small
+#> 25    sigma.logN     6 2.388496e-05 FALSE too small
+#> 26    sigma.logN     7 2.388496e-05 FALSE too small
+```
+
+#### 以前の解析結果の初期値を利用したい
+
+\-`par_list`に固定効果とランダム効果のパラメータ推定値がリスト形式で与えられている -
+これを次の解析の初期値として使うことで、推定を安定化させることができる -
+ただし、固定効果とランダム効果の数や構造が変わるとうまく行かないので、注意すること -
+ここでは`rho.mode`を変更したときを例に説明する
+
+``` r
+
+
+input$p0.list <- res_ri$par_list
+input$rho.mode <- 2
+res_rho2 <- do.call(sam, input)
+
+plot_samvpa(list(res_ri, res_rho2), CI=0.8,
+            scenario_name=rev(c("Rho3","Rho2")))
+```
+
+![](FAQ_files/figure-html/use-p0-1.png)
+
+#### 初期値を設定する方法
+
+収束しにくい場合や、勾配がやや大きい場合は、初期値を変更して再解析することが有効な場合があります。
+[`sam()`](https://shotanishijima.github.io/frasam/reference/sam.md)
+では、主な固定効果パラメータの初期値を `xx.init`
+という引数で指定できます。 これらの引数は、内部で
+[`log()`](https://rdrr.io/r/base/Log.html) や `logit()`
+に変換されるため、基本的には通常のスケールで値を与えます。
+
+- `q.init`: index ごとの q の初期値。長さは index の数と同じにします
+- `sdFsta.init`: F のランダムウォークのプロセス誤差 SD の初期値。長さは
+  `unique(varF)` の数と対応します
+- `sdLogN.init`: 資源尾数 N のプロセス誤差 SD の初期値。長さは
+  `unique(varN)` の数と対応します
+- `sdLogObs.init`: catch at age と index の観測誤差 SD の初期値。長さは
+  `unique(varC)` と `unique(index.key)` を合わせた数と対応します
+- `rho.init`: F
+  のランダムウォークの年齢間相関係数の初期値。0から1の間の値を指定します
+- `a.init`, `b.init`: 再生産関係パラメータの初期値。正の値を指定します
+
+例えば、VPAで得られた q を `q.init`
+として使う場合は、以下のように指定します。
+
+``` r
+
+
+# last catch zeroのとき最終年の加入IndexがあるとInfがでるとqが推定できないので除いておく
+dat_ex2 <- dat_ex
+dat_ex2$index[1:2,ncol(dat_ex2$index)] <- NA_real_
+
+res_vpa <- frasyr::vpa(
+  dat_ex2,
+  last.catch.zero = TRUE,
+  fc.year=2011:2013,
+  tf.year = 2010:2012,
+  term.F="max",
+  stat.tf="mean",
+  Pope=TRUE,
+  tune=TRUE,
+  p.init=0.5, 
+  abund = c("N","N","N","SSB","B"),
+  min.age=c(0,0,1,0,0),
+  max.age = c(0,0,1,6,6), 
+  sel.update=TRUE)
+
+q_init <- res_vpa$q #VPAの推定値を持ってくる
+input <- res_rw$input
+input$q.init <- q_init
+
+res_qinit <- do.call(sam,input)
+```
+
+#### 初期値をランダムに変えてよい解を探したい
+
+初期値に依存して局所解に入っている可能性がある場合は、[`do_jitter()`](https://shotanishijima.github.io/frasam/reference/do_jitter.md)
+で初期値をランダムに少しずつ変えて、複数回推定することができます。
+[`do_jitter()`](https://shotanishijima.github.io/frasam/reference/do_jitter.md)
+は各試行の目的関数値を `resdat` に保存します。
+同じモデル・同じデータで比較する場合は、`obj_value`
+が小さいものを、尤度が高い解として選びます。 `ID = 0` は jitter
+する前の元の結果を表します。 `ID > 0`
+が選ばれた場合は、初期値を変えることで目的関数値が改善したことを意味します。
+ただし、[`do_jitter()`](https://shotanishijima.github.io/frasam/reference/do_jitter.md)
+の `reslist`
+に保存される結果は、[`sam()`](https://shotanishijima.github.io/frasam/reference/sam.md)
+の完全な出力ではなく、目的関数値の比較に使う簡易的な結果です。
+通常の図や出力には、改めて
+[`sam()`](https://shotanishijima.github.io/frasam/reference/sam.md)
+の結果オブジェクトを使ってください。
+
+``` r
+
+jitter_res <- do_jitter(
+  res_rw,
+  SD = 0.1,   # 初期値に加える正規乱数の標準偏差
+  nsim = 20,  # jitterする回数
+  seed = 1
+)
+
+jitter_res$resdat
+
+best_id <- jitter_res$resdat$ID[which.min(jitter_res$resdat$obj_value)]
+best_id
+
+if (best_id == 0) {
+    res_best <- res_rw
+  } else {
+    input <- res_rw$input
+    input$p0.list <- jitter_res$reslist[[best_id]]$obj$env$parList()
+    res_best <- do.call(sam, input)
+  }
+```
+
+#### 資源尾数Nのプロセス誤差を小さい値に固定したい
+
+- SAMではVPAと異なり、加入以降の個体数が、漁獲死亡(F)と自然死亡係数(M)以外の要因（プロセス誤差）によっても変化することを仮定します
+- その値を小さくすることで、VPAと同じ個体群動態になります
+- 上の診断例のように、`sigma.logN`
+  が極端に小さい場合は、以下の設定で1歳以上のsigma.logNを小さい値で固定して、推定しないことが推奨されます
+- `varN.fix = c(NA, 0.0001)`のように引数を設定してください。NAは0歳（加入）を推定すること、1歳魚以上の過程誤差の分散を0.0001に固定することを意味しています。
+- 設定するのはSDではなく分散であることに注意してください。つまり0.0001とするとSDは0.01で固定されます
+- `varN.fix`の長さは、`unique(varN)`の長さと一致しなくてはいけません
+
+``` r
+
+
+input <- res_rw$input
+input$varN #1歳魚以上が共通
+#> [1] 0 1 1 1 1 1 1
+input$varN.fix <- c(NA,0.0001) #SDではなくて分散
+
+res_varNfix = do.call(sam, input)
+res_varNfix$sigma.logN #1歳魚以上はSD=0.01に固定
+#> [1] 0.6276352 0.0100000 0.0100000 0.0100000 0.0100000 0.0100000 0.0100000
+
+check_fit_sam(res_varNfix, verbose = TRUE) #すべてOKになる
+#>                          check   ok            value       threshold
+#>          optimizer convergence TRUE                0               0
+#>      positive definite Hessian TRUE             TRUE            TRUE
+#>  maximum fixed-effect gradient TRUE        0.0004075            0.01
+#>    finite fixed effects and SE TRUE            17/17             all
+#>        maximum fixed-effect SE TRUE           0.6788             Inf
+#>  maximum absolute fixed effect TRUE            5.553             Inf
+#>           reported sigma range TRUE    0.01 to 1.373     1e-04 to 10
+#>             reported rho range TRUE 0.9796 to 0.9796 1e-04 to 0.9999
+#>  parameters near finite bounds TRUE                0               0
+#>                                                                         message
+#>                                                   nlminb convergence code is 0.
+#>                                                 sdreport reports pdHess = TRUE.
+#>                                         Maximum absolute fixed-effect gradient.
+#>                    Fixed-effect estimates and standard errors should be finite.
+#>                         Large standard errors can indicate weak identification.
+#>      Extremely large internal-scale estimates can indicate weak identification.
+#>  Reported standard deviations should be finite and within the diagnostic range.
+#>                 Rho values very close to 0 or 1 can indicate boundary behavior.
+#>                   Only checked when finite lower or upper bounds were supplied.
+```
+
+#### ある固定効果パラメータをある値に固定して使いたい
+
+- 上記で説明したNの過程誤差以外にも、他のパラメータを固定したい場合があるかもしれない
+- 例えば、catch at
+  ageの観測誤差の分散が事前に分かっている場合はその値を固定することは妥当だと思われる
+- TMBでは`map`という機能を使って、固定効果パラメータを初期値に固定できる機能がある
+- `sam`では`map.add`という引数を利用することで、特定のパラメータを固定できる
+- SAMではcatch at
+  ageの観測誤差とIndexの観測誤差（のSDのlog）が共にlogSdLogObsというパラメータで推定されているので、その場所を見つける必要がある
+
+``` r
+
+input <- res_varNfix$input
+
+# 現在の推定値を次の初期値に使う
+input$p0.list <- res_varNfix$par_list
+
+# 有効桁数の違いで match() が NA になることがあるので、
+# 許容誤差つきで一番近い位置を探す関数を用意する
+find_pos <- function(x, target, tol = 1e-6) {
+  pos <- which(abs(x - target) < tol)
+  if (length(pos) == 0) {
+    pos <- which.min(abs(x - target))
+  }
+  pos[1]
+}
+
+# logSdLogObs は log スケールだが、確認しやすいように SD スケールで比較する
+sigma_hat <- exp(input$p0.list$logSdLogObs)
+
+# sigma.logC に対応する logSdLogObs の位置を探す
+idx_logC <- sapply(unique(res_varNfix$sigma.logC), function(z) {
+  find_pos(sigma_hat, z, tol = 1e-6)
+})
+
+idx_logC
+#> [1] 1 2 3
+sigma_hat[idx_logC]
+#> [1] 0.5552559 0.2700807 0.4574298
+exp(input$p0.list$logSdLogObs[idx_logC])
+#> [1] 0.5552559 0.2700807 0.4574298
+
+# 例: すべてのsigma.logCを 0.2 に固定する
+fix_pos <- idx_logC[]
+
+# map は、推定するパラメータには番号、固定するパラメータには NA を入れる
+map_logSdLogObs <- seq_along(input$p0.list$logSdLogObs)
+map_logSdLogObs[fix_pos] <- NA
+
+# 固定したい値を初期値として入れる（logをとること）
+input$p0.list$logSdLogObs[fix_pos] <- log(0.2)
+input$map.add <- list(logSdLogObs = factor(map_logSdLogObs))
+
+res_sigma02 <- do.call(sam, input)
+
+# 固定したグループが 0.2 になっていることを確認する
+res_sigma02$sigma.logC
+#> [1] 0.2 0.2 0.2 0.2 0.2 0.2 0.2
+abs(res_sigma02$sigma.logC - 0.2) < 1e-6
+#> [1] TRUE TRUE TRUE TRUE TRUE TRUE TRUE
+
+# 固定したパラメータは opt$par には出てこない
+res_sigma02$opt$par[names(res_sigma02$opt$par) == "logSdLogObs"]
+#> logSdLogObs logSdLogObs logSdLogObs logSdLogObs logSdLogObs 
+#>   0.1326106   0.3298184  -0.6822933  -1.0575786  -0.2981355
+```
+
+#### VPAと同じような設定で解析したい
+
+- SAMで、VPAの仮定を同じような設定をすることによって、VPAのようなモデルを解析することができる
+- ①年齢別漁獲尾数の観測誤差を小さくする、②1歳魚以上の資源尾数の過程誤差を小さくする、③FのRandom
+  walkにおける年齢間の相関をゼロにし、各年齢の観測誤差のSDを（なるべく）別々に推定する、ことによって、VPAの仕様に近づけることになります。
+- ①については、`varC`, `sdLogObs.init`, `map.add`
+  を以下のようにすることで実行できます（[ある固定効果パラメータをある値に固定して使いたい](#fix-SDlogC)も参照のこと）
+- ②については、`varN`, `varN.fix`
+  を以下のように設定してください（[資源尾数Nのプロセス誤差を小さい値に固定したい](#fix-SDlogN)も参照のこと）
+- ③については、`varF`, `rho.mode`を以下のように設定してください
+- ここではやっていませんが、上記の設定のon/offを組み合わせることで、catch
+  at ageの観測誤差、1歳魚以上の過程誤差,
+  Fのランダムウォークに相対的影響を評価することもできるかと思います
+
+``` r
+
+res_vpalike  <- sam(
+  dat_ex,
+  last.catch.zero = TRUE, #最終年のcatchがzeroかどうか
+  abund = c("N","N","N","SSB","B"),
+  min.age=c(0,0,1,0,0),
+  max.age = c(0,0,1,6,6),
+  rec.age = 0,
+  index.key=0:4,
+  b.est=FALSE,
+  SR = "RW",
+  varC = c(0,0,0,0,0,0,0), #すべての年齢で観測誤差が共通
+  sdLogObs.init = c(0.01, rep(0.5, nrow(dat_ex$index))), #catch at ageのSDの初期値0.01とし、Indexについては0.5とする
+  map.add = list(logSdLogObs = factor(c(NA,1:rep(nrow(dat_ex$index))))),　#catch at ageのSDのみmapで初期値に固定する
+  varN = c(0,1,1,1,1,1,1),
+  varN.fix = c(NA,0.0001),
+  varF = c(0,1,2,3,4,5,5), #年齢別に推定するが、最高齢とその1歳前は同じ数字にしてください（収束しない場合は共通する）
+  rho.mode=0, #Fのrandom wallk process errorの年齢間の相関なし
+  bias.correct = FALSE,
+  silent = TRUE
+)
+
+check_fit_sam(res_vpalike, verbose = FALSE)
+
+res_vpalike$sigma.logC #Catch at ageの観測誤差が小さくなっていることを確認
+#> [1] 0.01 0.01 0.01 0.01 0.01 0.01 0.01
+# res_vpalike$sigma.logF
+
+res_vpalike$sigma.logN #N at age 1+の仮定誤差が小さくなっていることを確認
+#> [1] 0.6705049 0.0100000 0.0100000 0.0100000 0.0100000 0.0100000 0.0100000
+
+plot_samvpa(list(res_rw, res_vpalike), scenario_name = c("SAM","VPA-like"))
+```
+
+![](FAQ_files/figure-html/vpa-like%20model1-1.png)
+
+- 以下のコードで、catch-at-ageへの当てはまりを比較することができます
+- VPA-like
+  modelの方は、catch-at-ageの観測値とほぼ変わらない値が推定できることが分かります
+
+``` r
+
+caa_to_long <- function(x, value_name) {
+  out <- as.data.frame(as.table(as.matrix(x)), stringsAsFactors = FALSE)
+  names(out) <- c("Age", "Year", value_name)
+  out$Age <- as.numeric(as.character(out$Age))
+  out$Year <- as.numeric(as.character(out$Year))
+  out
+}
+
+caa_obs <- caa_to_long(res_rw$input$dat$caa, "Catch")
+if (isTRUE(res_rw$input$last.catch.zero)) {
+  caa_obs <- caa_obs[caa_obs$Year < max(caa_obs$Year), ]
+}
+
+caa_pred_sam <- caa_to_long(res_rw$caa, "Catch")
+caa_pred_sam$Model <- "SAM"
+
+caa_pred_vpalike <- caa_to_long(res_vpalike$caa, "Catch")
+caa_pred_vpalike$Model <- "VPA-like"
+
+caa_pred <- rbind(caa_pred_sam, caa_pred_vpalike)
+caa_pred <- caa_pred[
+  caa_pred$Year %in% caa_obs$Year &
+    caa_pred$Age %in% caa_obs$Age,
+]
+
+ggplot2::ggplot() +
+  ggplot2::geom_point(
+    data = caa_obs,
+    ggplot2::aes(x = Year, y = Catch),
+    colour = "black",
+    size = 1.6
+  ) +
+  ggplot2::geom_line(
+    data = caa_pred,
+    ggplot2::aes(x = Year, y = Catch, colour = Model, linetype = Model),
+    linewidth = 0.8
+  ) +
+  ggplot2::facet_wrap(ggplot2::vars(Age), scales = "free_y") +
+  ggplot2::labs(
+    x = "Year",
+    y = "Catch at age",
+    colour = "Model",
+    linetype = "Model"
+  ) +
+  # + scale_y_log10()　#縦軸をlog scaleにした方がよければコメントアウトを外してください
+  ggplot2::theme_bw() 
+```
+
+![](FAQ_files/figure-html/compare-caa-fit-vpalike-1.png)
+
+- 以下のコードで、F-at-ageや選択率を比較することができます
+- VPA-like
+  modelのほうがFや選択率がギザギザしており、SAMは平滑化されていることが分かります
+
+``` r
+
+age_year_to_long <- function(x, model, metric) {
+  out <- as.data.frame(as.table(as.matrix(x)), stringsAsFactors = FALSE)
+  names(out) <- c("Age", "Year", "Value")
+  out$Age <- factor(out$Age, levels = rownames(x))
+  out$Year <- as.numeric(as.character(out$Year))
+  out$Model <- model
+  out$Metric <- metric
+  out
+}
+
+faa_saa_dat <- rbind(
+  age_year_to_long(res_rw$faa, "SAM", "F-at-age"),
+  age_year_to_long(res_vpalike$faa, "VPA-like", "F-at-age"),
+  age_year_to_long(res_rw$saa, "SAM", "Selectivity at age"),
+  age_year_to_long(res_vpalike$saa, "VPA-like", "Selectivity at age")
+)
+
+faa_saa_dat$Model <- factor(faa_saa_dat$Model, levels = c("SAM", "VPA-like"))
+faa_saa_dat$Metric <- factor(
+  faa_saa_dat$Metric,
+  levels = c("F-at-age", "Selectivity at age")
+)
+
+age_levels <- levels(faa_saa_dat$Age)
+linetype_values <- rep(c("solid", "dashed", "dotted", "dotdash", "longdash", "twodash"),
+                       length.out = length(age_levels))
+names(linetype_values) <- age_levels
+
+ggplot2::ggplot(
+  faa_saa_dat,
+  ggplot2::aes(x = Year, y = Value, colour = Age, linetype = Age)
+) +
+  ggplot2::geom_line(linewidth = 0.8) +
+  ggplot2::facet_grid(
+    ggplot2::vars(Metric),
+    ggplot2::vars(Model),
+    scales = "free_y"
+  ) +
+  ggplot2::scale_linetype_manual(values = linetype_values) +
+  ggplot2::labs(
+    x = "Year",
+    y = NULL,
+    colour = "Age",
+    linetype = "Age"
+  ) +
+  ggplot2::theme_bw()
+```
+
+![](FAQ_files/figure-html/compare-faa-saa-vpalike-1.png)
+
+#### Indexの観測誤差のSD`sigma`を共通に解析したい
+
+- すべてのIndexで同じSDを使用する場合は（[`frasyr::vpa()`](https://rdrr.io/pkg/frasyr/man/vpa.html)の`est.method="ls"`に相当）、引数を`input$index.key <- rep(0, length(input$abund))`のように設定する
+- 特定のIndexにおいて共通のSDを使用する場合は`input$index.key <- c(0,0,1,2,3)`のように設定する（1番目と2番目のIndexのSDが等しい場合）
+
+``` r
+
+res_rw$sigma #index毎に異なる
+#> [1] 1.0984901 1.3729710 0.4887163 0.3385311 0.7328954
+
+input <- res_rw$input
+input$index.key <- rep(0, length(input$abund))
+res_ls <- do.call(sam, input)
+res_ls$sigma
+#> [1] 0.8865264 0.8865264 0.8865264 0.8865264 0.8865264
+
+input$index.key <- c(0,0,1,2,3)
+res_rw2 <- do.call(sam, input)
+res_rw2$sigma
+#> [1] 1.2438601 1.2438601 0.4909688 0.3384182 0.7341535
+
+#AICの比較
+c(res_rw$aic, res_ls$aic, res_rw2$aic)
+#> [1]  976.4474 1053.1456  976.3630
+```
+
+#### IndexとAbundanceの間の非線形性を推定したい
+
+デフォルトでは `b.est = FALSE` として、index
+と資源量の関係を比例関係、つまり `b = 1` として扱います。 一方、index
+が資源量に対して非線形に反応すると考えられる場合は、`b.est = TRUE`
+として `b` を推定できます。 `b.fix` に `NA` を指定した index では `b`
+を推定し、数値を指定した index ではその値に固定します。 例えば
+`b.fix = c(1, 1, 1, NA, NA)` とすると、1から3番目の index は `b = 1`
+に固定し、4から5番目の index だけで `b` を推定します。
+1以外の値に固定することもできます。
+
+`b` を推定するとパラメータ数が増えるため、収束状況や `b`
+の推定値が極端でないかを確認し、AIC などでモデルを比較します。
+
+``` r
+
+
+input <- res_rw$input
+input$b.est <- TRUE
+input$p0.list <- res_rw$par_list
+res_estb_full <- do.call(sam, input)
+res_estb_full$b #すべてのindexでbが推定される
+#> [1] 0.9775696 0.9484946 1.0082822 0.9249474 0.8870780
+check_fit_sam(res_estb_full, verbose = FALSE)
+
+c(res_rw$aic, res_estb_full$aic)
+#> [1] 976.4474 982.5655
+
+input$b.fix <- c(1,1,1,1,NA) #1-4番目のindexはb=1に固定し、5番目のindexはb推定を行う
+res_estb_45 <- do.call(sam, input)
+res_estb_45$b #
+#> [1] 1.0000000 1.0000000 1.0000000 1.0000000 0.9973021
+check_fit_sam(res_estb_45, verbose = FALSE)
+
+c(res_rw$aic, res_estb_full$aic, res_estb_45$aic)
+#> [1] 976.4474 982.5655 976.0210
+```
+
+#### 加入年齢を1歳にしたい
+
+`rec.age`
+を指定すると、再生産関係で対応させる親魚量と加入尾数の年をずらして解析できます。
+過程誤差の推定開始年を`rec.age`の年数分遅らせることになります。
+そのため、過程誤差の数が違うので、異なる`rec.age`の場合でAICや尤度を比較することはできません。
+以下では、`rec.age = 0` と `rec.age = 1`
+の再生産関係のプロットを横に並べて比較します。 `rec.age = 1`
+の図では、加入尾数の点が親魚量の年に対応するように自動的にずれて表示されます。
+
+``` r
+
+input <- res_bh$input
+input$rec.age <- 1
+input$p0.list <- res_bh$par_list
+res_bh_rec1 <- do.call(sam, input)
+
+g0 <- plot_SR_simple(res_bh) +
+  ggplot2::labs(title = "Recruitment age 0")
+g1 <- plot_SR_simple(res_bh_rec1) +
+  ggplot2::labs(title = "Recruitment age 1")
+
+gridExtra::grid.arrange(g0, g1, nrow=1)
+```
+
+![](FAQ_files/figure-html/rec_age1-1.png)
+
+### SAMの結果の出力
+
+#### `plot_samvpa()`の縦軸のスケールを換えたい
+
+- [`plot_samvpa()`](https://shotanishijima.github.io/frasam/reference/plot_samvpa.md)
+  では、加入量、資源量、親魚量、漁獲量の表示スケールを個別に変更できます。
+  デフォルトはいずれも `1000`
+  なので、引数を指定しない場合はこれまでと同じ図になります。
+
+- 下の例では、加入量は元のスケールで表示し、資源量と親魚量は `10000`
+  で割って表示しています。
+
+``` r
+
+gg1 <- plot_samvpa(
+  list(res_rw, res_bh, res_ri),
+  CI = 0.8,
+  scenario_name = rev(c("RW", "BH", "RI")),
+  scale_recruitment = 1,
+  scale_biomass = 10000,
+  scale_ssb = 10000
+)
+print(gg1)
+```
+
+![](FAQ_files/figure-html/plot-samvpa-scale-example-1.png)
+
+- 以下のやり方で、表示名を事後的に変えて、日本語表記や単位を含めることができます
+
+``` r
+
+gg1 +
+    ggplot2::facet_wrap(
+      ggplot2::vars(stat_f),
+      scales = "free_y",
+      ncol = 2,
+      labeller = ggplot2::as_labeller(c(
+        "Recruitment" = "加入量（尾）",
+        "Biomass" = "資源量（万トン）",
+        "SSB" = "親魚量（万トン）",
+        "Exploitation_rate" = "漁獲割合"
+      ))
+    )
+```
+
+![](FAQ_files/figure-html/plot-samvpa-facet-label-1.png)
+
+#### 資源量や親魚量の変動要因を明らかにしたい
+
+`decompose_biomass_factors`という関数を使って、ある年から翌年の資源量および親魚量の変化量（絶対値
+or パーセント）を、(1)新規個体の加入 (recruitment)、(2)漁獲による死亡
+(fishing)、(3)自然死亡 (natural)、(4)前年にいた個体の成長
+(growth)、(5)過程誤差 (process)、(6)前年にいた個体の成熟 (maturity,
+SSBのみ)に分解できます。これによって、どの要因が個体群動態を駆動しているかを、定量化・定量化できます。
+
+プロットには、`plot_biomass_factors`を用います。
+
+- Shapley分解という手法で、年齢ごとに各要因の周辺効果を求めています。そのため、各要因・各年齢ごとに要因分解することも可能です。
+- VPAでも動くようになっているので、両方で比較するのもありかも。
+- 前の年と評価が大きく変わった際の要因分析にも使えるかなと思います。
+
+``` r
+
+
+# process errorが推定されるようなデータを作る（実際はこの手順は不要です）
+input <- res_rw$input
+
+caa2 <- input$dat$caa
+caa2[,as.character(1985:1994)] <- input$dat$caa[,as.character(1985:1994)]^1.5
+
+caa2[,as.character(2000:2014)] <- input$dat$caa[,as.character(2000:2014)]^0.75
+
+input$dat$caa <- caa2
+# input$dat$M[] <- 0.6
+input$p0.list <- NULL
+# res_rw$sigma.logN
+
+res_proc <- do.call(sam, input)
+res_proc$sigma.logN
+#> [1] 0.5975384 0.1640797 0.1640797 0.1640797 0.1640797 0.1640797 0.1640797
+
+factor_b <- decompose_biomass_factors(
+    res_proc,
+    target = "biomass"
+  )
+
+# biomassの絶対量
+knitr::kable(factor_b$age_aggregated)
+```
+
+|  | 1975 | 1976 | 1977 | 1978 | 1979 | 1980 | 1981 | 1982 | 1983 | 1984 | 1985 | 1986 | 1987 | 1988 | 1989 | 1990 | 1991 | 1992 | 1993 | 1994 | 1995 | 1996 | 1997 | 1998 | 1999 | 2000 | 2001 | 2002 | 2003 | 2004 | 2005 | 2006 | 2007 | 2008 | 2009 | 2010 | 2011 | 2012 | 2013 | 2014 |
+|:---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| recruitment | 1899019 | 2746780.4 | 2319582.4 | 1218777.9 | 974175.4 | 1300263.6 | 1766566.8 | 2380311.1 | 2563593.434 | 3946424.2 | 6591958.5 | 3144129 | 1720912 | 524070.9 | 229790.377 | 209013.08 | 374794.116 | 568537.1 | 265439.99 | 138938.39 | 199712.24 | 292528.020 | 205740.29790 | 99983.29 | 111997.46 | 101084.82 | 135625.35 | 154296.473 | 176933.23 | 396695.613 | 286203.65 | 193079.114 | 312309.66 | 345684.149 | 534585.20 | 454419.70 | 492904.26 | 994496.32 | 2377627.043 | 5744316.9 |
+| growth | 0 | 2312905.4 | 2865695.4 | 2794485.5 | 1769580.4 | 1236487.0 | 1382513.0 | 1857532.9 | 2555485.321 | 3037354.9 | 4388192.3 | 6694213 | 4273701 | 2245679.3 | 693893.336 | 221811.63 | 204113.782 | 358990.1 | 573122.14 | 397857.72 | 167574.36 | 164068.619 | 261995.52851 | 243686.89 | 161689.25 | 140263.24 | 128624.34 | 156197.775 | 183240.44 | 212915.867 | 402082.97 | 396331.096 | 315131.98 | 366283.156 | 407130.90 | 584189.25 | 595144.11 | 621900.63 | 1014430.168 | 2310369.5 |
+| fishing | 0 | -729670.6 | -1069622.0 | -850315.5 | -2196682.1 | -778364.9 | -554552.3 | -426636.3 | -493359.793 | -385085.0 | -363057.8 | -3971854 | -6751163 | -3867284.9 | -3074848.507 | -363959.63 | -138750.176 | -95910.7 | -191356.03 | -395304.59 | -586780.22 | -84041.135 | -123693.06567 | -90354.19 | -52479.41 | -32235.51 | -12470.20 | -11537.329 | -11350.80 | -12832.191 | -17670.35 | -23296.504 | -25556.76 | -30845.711 | -32446.58 | -22354.54 | -37638.40 | -32050.03 | -49341.907 | -64073.3 |
+| process | 0 | -233691.8 | -191289.3 | -218531.4 | -196027.9 | -158757.3 | -131201.5 | -116311.1 | 7237.033 | 163078.1 | 583321.3 | 1217119 | 1000081 | 519831.3 | 5053.001 | -10011.75 | 1724.913 | 34971.1 | 84441.86 | 75483.31 | -16910.41 | -4386.091 | -67.71783 | -8384.98 | -26009.42 | -21719.90 | -14892.05 | -4667.845 | -1527.12 | -2235.776 | 21256.40 | 1991.771 | -23484.44 | 3406.324 | -34782.40 | 10996.26 | 14851.04 | -27954.94 | 3192.676 | 137423.3 |
+| natural | 0 | -3257001.4 | -3719538.9 | -3843868.6 | -2771281.4 | -1924596.0 | -1887351.2 | -2326650.6 | -3163725.142 | -4040065.9 | -5782200.9 | -8104156 | -6181397 | -3522347.7 | -1265381.530 | -322648.74 | -262040.469 | -409006.3 | -666362.09 | -588924.28 | -272912.48 | -183300.858 | -286412.08324 | -312811.27 | -263518.20 | -232714.79 | -216192.34 | -236536.415 | -271415.05 | -313779.235 | -499899.18 | -578518.007 | -543004.48 | -579127.517 | -628878.03 | -805327.76 | -906565.98 | -976457.84 | -1354852.066 | -2659648.0 |
+| maturity | 0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.000 | 0.0 | 0.0 | 0 | 0 | 0.0 | 0.000 | 0.00 | 0.000 | 0.0 | 0.00 | 0.00 | 0.00 | 0.000 | 0.00000 | 0.00 | 0.00 | 0.00 | 0.00 | 0.000 | 0.00 | 0.000 | 0.00 | 0.000 | 0.00 | 0.000 | 0.00 | 0.00 | 0.00 | 0.00 | 0.000 | 0.0 |
+
+``` r
+
+# 前年のbiomass対する比率 (%)
+knitr::kable(factor_b$percent_aggregated)
+```
+
+|  | 1975 | 1976 | 1977 | 1978 | 1979 | 1980 | 1981 | 1982 | 1983 | 1984 | 1985 | 1986 | 1987 | 1988 | 1989 | 1990 | 1991 | 1992 | 1993 | 1994 | 1995 | 1996 | 1997 | 1998 | 1999 | 2000 | 2001 | 2002 | 2003 | 2004 | 2005 | 2006 | 2007 | 2008 | 2009 | 2010 | 2011 | 2012 | 2013 | 2014 |
+|:---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| recruitment | NA | 43.508489 | 32.43025 | 16.565434 | 15.085012 | 32.203333 | 47.581725 | 55.502252 | 45.3178252 | 55.379460 | 66.937993 | 20.595532 | 12.08037 | 6.308289 | 5.4613110 | 26.254250 | 70.6737373 | 80.05782 | 22.731098 | 11.268089 | 23.19334 | 83.161405 | 38.3394702 | 16.826797 | 21.279727 | 22.071389 | 32.865474 | 35.604420 | 36.0267751 | 69.9643694 | 33.759949 | 18.5700420 | 30.341302 | 32.4672077 | 45.686426 | 32.0979680 | 30.0982619 | 55.362203 | 100.0567124 | 131.529101 |
+| growth | NA | 36.635990 | 40.06549 | 37.982201 | 27.401780 | 30.623793 | 37.237401 | 43.312515 | 45.1744944 | 42.622654 | 44.559865 | 43.850268 | 30.00032 | 27.031443 | 16.4914098 | 27.861884 | 38.4890883 | 50.55073 | 49.079625 | 32.266793 | 19.46105 | 46.642290 | 48.8225684 | 41.011550 | 30.721260 | 30.625811 | 31.168951 | 36.043151 | 37.3110372 | 37.5515229 | 47.428818 | 38.1184943 | 30.615495 | 34.4018994 | 34.793997 | 41.2642496 | 36.3413443 | 34.620328 | 42.6898524 | 52.901124 |
+| fishing | NA | -11.557846 | -14.95446 | -11.557352 | -34.015408 | -19.277588 | -14.936632 | -9.947975 | -8.7213489 | -5.403828 | -3.686668 | -26.017528 | -47.39148 | -46.550857 | -73.0783597 | -45.717175 | -26.1636804 | -13.50554 | -16.386878 | -32.059730 | -68.14501 | -23.891656 | -23.0500619 | -15.206257 | -9.971186 | -7.038469 | -3.021847 | -2.662277 | -2.3112255 | -2.2631864 | -2.084355 | -2.2406207 | -2.482874 | -2.8970785 | -2.772932 | -1.5790146 | -2.2983175 | -1.784180 | -2.0764354 | -1.467103 |
+| process | NA | -3.701635 | -2.67443 | -2.970243 | -3.035473 | -3.931905 | -3.533858 | -2.712053 | 0.1279324 | 2.288446 | 5.923331 | 7.972706 | 7.02032 | 6.257256 | 0.1200921 | -1.257582 | 0.3252614 | 4.92441 | 7.231225 | 6.121797 | -1.96387 | -1.246901 | -0.0126191 | -1.411159 | -4.941839 | -4.742436 | -3.608723 | -1.077121 | -0.3109489 | -0.3943191 | 2.507358 | 0.1915654 | -2.281545 | 0.3199274 | -2.972555 | 0.7767219 | 0.9068508 | -1.556212 | 0.1343561 | 3.146616 |
+| natural | NA | -51.590294 | -52.00314 | -52.245249 | -42.913021 | -47.666032 | -50.835004 | -54.251039 | -55.9266306 | -56.693516 | -58.715315 | -53.086064 | -43.39186 | -42.398816 | -30.0736789 | -40.528090 | -49.4121398 | -57.59370 | -57.064279 | -47.762546 | -31.69436 | -52.109732 | -53.3725655 | -52.644913 | -50.068951 | -50.812166 | -52.388906 | -54.581557 | -55.2649668 | -55.3405825 | -58.967000 | -55.6409415 | -52.753613 | -54.3925819 | -53.744828 | -56.8843837 | -55.3577289 | -54.358027 | -57.0156888 | -60.898644 |
+| maturity | NA | 0.000000 | 0.00000 | 0.000000 | 0.000000 | 0.000000 | 0.000000 | 0.000000 | 0.0000000 | 0.000000 | 0.000000 | 0.000000 | 0.00000 | 0.000000 | 0.0000000 | 0.000000 | 0.0000000 | 0.00000 | 0.000000 | 0.000000 | 0.00000 | 0.000000 | 0.0000000 | 0.000000 | 0.000000 | 0.000000 | 0.000000 | 0.000000 | 0.0000000 | 0.0000000 | 0.000000 | 0.0000000 | 0.000000 | 0.0000000 | 0.000000 | 0.0000000 | 0.0000000 | 0.000000 | 0.0000000 | 0.000000 |
+
+``` r
+
+
+factor_s <- decompose_biomass_factors(
+    res_proc,
+    target = "ssb"
+  )
+
+
+g1 <- plot_biomass_factors(factor_b)
+g2 <- plot_biomass_factors(factor_s)
+
+g3 <- plot_biomass_factors(factor_b, type = "absolute", scale = 1000)
+g4 <- plot_biomass_factors(factor_s, type = "absolute", scale = 1000)
+
+patchwork::wrap_plots(
+  g1, g2, g3, g4,
+  ncol = 2,
+  guides = "collect"
+) &
+  ggplot2::theme(legend.position = "bottom")
+```
+
+![](FAQ_files/figure-html/decompose-biomass-effects-1.png)
+
+#### 過程誤差をプロットする
+
+Number at
+ageの過程誤差は、以下のようにプロットできる。ここでは、残差をそのまま示す方法と、Biomasssの対する影響をプロットする方法を示します。
+
+``` r
+
+
+  samres = res_proc
+  rept = samres$obj$env$report(samres$obj$env$last.par.best)
+  logNresid = rept$logN_resid
+
+  colnames(logNresid) <- colnames(samres$naa)
+
+  logNresid_long = logNresid |> as.data.frame() |> mutate(age = 1:n()-1) |>
+    mutate(Age = ifelse(age == max(age),str_c("Age ",age,"+"),str_c("Age ", age))) |>
+    dplyr::select(-age) |>
+    pivot_longer(cols=-Age,names_to="Year",values_to="Residual") |>
+    mutate(Var = "logN") |>
+    dplyr::filter(Year>min(Year)) #最初の年は0なので除く
+
+resid_long <- logNresid_long |> 
+  mutate(Year = as.numeric(Year))
+
+(g_proc_resid = resid_long |>
+      ggplot(aes(x=Year,y=Age,col=Residual,size=abs(Residual)))+
+      # geom_hline(yintercept=0) +
+      geom_point()+
+    ylab("Process error")+
+      scale_size_continuous(range=c(0,5))+
+      scale_colour_gradient2(high="red",low="blue",mid="gray")
+  )
+```
+
+![](FAQ_files/figure-html/plot-process-error-1.png)
+
+``` r
+
+
+# Biomassレベルでの影響
+logBresid = samres$baa*(exp(logNresid)-1)
+  
+  Bresid_long = logBresid |> as.data.frame() |> mutate(age = 1:n()-1) |>
+    dplyr::filter(age > 0) |>  #age 0 を入れたければ不要
+    mutate(Age = ifelse(age == max(age),str_c("Age ",age,"+"),str_c("Age ", age))) |>
+    dplyr::select(-age) |>
+    pivot_longer(cols=-Age,names_to="Year",values_to="Residual") |>
+    mutate(Var = "B_by_age") |>
+    dplyr::filter(Year>min(Year)) |> #最初の年は0なので除く
+    mutate(Value = Residual/1000) |>
+    mutate(Age = forcats::fct_rev(Age))
+
+  (g_proc_resid2 = Bresid_long |>
+      ggplot(aes(x=as.numeric(Year),y=Value,fill=Age)) +
+      geom_bar(stat="identity") +
+      ylab("Effect of process error on biomass")+
+      scale_fill_brewer(palette="Set3") +
+      theme_bw() + xlab("Year")
+  )
+```
+
+![](FAQ_files/figure-html/plot-process-error-2.png)
+
+#### 固定効果間の相関をプロットする
+
+固定効果の相関は以下のようなコードでプロットできます。
+
+``` r
+
+cor_mat = cov2cor(samres$rep$cov.fixed)
+
+tmp = data.frame(varname = colnames(cor_mat)) |>
+    group_by(varname) |>
+    mutate(id = 1:n(), n = n()) |>
+    mutate(varname2= ifelse(n==1, varname, str_c(varname,id)))
+
+varname = tmp$varname2
+colnames(cor_mat) <- rownames(cor_mat) <- varname
+
+  (g_cor = ggcorrplot::ggcorrplot(cor_mat ,lab=TRUE,type="upper",lab_size=1.5,digits=2,colors=c("lightblue","white","darkorange")) +
+      theme_bw(base_size=9) +
+      theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+            legend.justification=c(0.99,0.01),
+            legend.position.inside=c(0.99,0.01),
+            legend.position = "inside")+
+      xlab("")+ylab("")
+    )
+```
+
+![](FAQ_files/figure-html/plot-FEcorrelation-1.png)
+
+#### 成分ごとの条件付き負の対数尤度を求めて、プロットしたい
+
+[`get_cond_nll()`](https://shotanishijima.github.io/frasam/reference/get_cond_nll.md)を使うと、推定されたランダム効果に条件付けた負の対数尤度（negative
+log-likelihood;
+NLL）を、資源尾数Nの過程、漁獲死亡係数Fの過程、年齢別漁獲尾数、および各資源量指標に分けて確認できます。NLLが小さいほど、その成分について観測値または状態の変化がモデルの仮定の下で生じやすいことを表します。ただし、各成分ではデータ数、次元、分散、確率分布が異なるため、成分間のNLLの絶対値や正負をそのまま当てはまりの優劣として比較することはできません。特に、分散を小さな値に固定した正規分布では確率密度が1を超え、NLLが負になることがあります。また、ここで示す値はLaplace近似後の周辺負の対数尤度ではないことにも注意してください。
+
+以下では、1歳以上のNのプロセス誤差だけを小さく固定したモデル（varN-fix）と、さらに年齢別漁獲尾数の観測誤差を小さくし、Fのランダムウォークの年齢間相関をなくしたモデル（VPA-like）を比較します。この例では、1歳魚以上のNプロセス誤差が小さいのでProcess_Nのnllが非常に小さくなっています。VPA-likeモデルでは、年齢別漁獲尾数に強く適合するよう制約されるため、catch-at-ageのNLLは小さくなります。その一方で、年齢別漁獲尾数の年変動をFの変化として説明する必要が強くなるため、F過程のNLLは大きくなります。これは、観測への適合度とF過程の滑らかさの間のトレードオフを示しています。このようにモデル間のNLLを比較することで、それぞれのモデルの特徴を把握することができます。
+
+``` r
+
+
+cond_nll1 <- get_cond_nll(res_varNfix)
+knitr::kable(cond_nll1)
+```
+
+| type         |        nll |
+|:-------------|-----------:|
+| Process_N    | -827.21626 |
+| Process_F    | -290.70462 |
+| Catch_at_age |   82.62482 |
+| Index_1      |   60.06802 |
+| Index_2      |   69.16650 |
+| Index_3      |   26.34139 |
+| Index_4      |   12.16784 |
+| Index_5      |   43.96092 |
+
+``` r
+
+
+cond_nll2 <- get_cond_nll(res_vpalike)
+
+g1 <- plot_cond_nll(cond_nll1) + ggtitle("varN-fix")
+g2 <- plot_cond_nll(cond_nll2) + ggtitle("VPA-like")
+
+patchwork::wrap_plots(
+  g1, g2,
+  ncol = 2,
+  guides = "collect"
+) 
+```
+
+![](FAQ_files/figure-html/cond-nll-1.png)
